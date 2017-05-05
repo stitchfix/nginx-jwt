@@ -3,6 +3,13 @@ local cjson = require "cjson"
 local basexx = require "basexx"
 local secret = os.getenv("JWT_SECRET")
 
+local login_uri = "https://admin-auth-service.production.stitchfix.com/login/saml/onelogin"
+local login_redirect_arg = 'origin'
+local cookie_name = 'Keyhole_JWT'
+local cookie_key = 'cookie_' .. cookie_name
+-- local login_uri = os.getenv("LOGIN_URI")
+-- local login_redirect_arg = os.getenv("LOGIN_REDIRECT_ARG")
+
 assert(secret ~= nil, "Environment variable JWT_SECRET not set")
 
 if os.getenv("JWT_SECRET_IS_BASE64_ENCODED") == 'true' then
@@ -22,23 +29,34 @@ end
 
 local M = {}
 
-function M.auth(claim_specs)
+function M.set_cookie_and_redirect_to_origin()
+    local args = ngx.decode_args(ngx.var.args, 0)
+    local cookie = cookie_name .. "=" .. args.jwt ..
+        ";HttpOnly;Domain=." .. ngx.var.host .. ";Path=/;Secure;"
+
+    ngx.log(ngx.INFO, "setting cookie: " .. cookie)
+    ngx.header["Set-Cookie"] = cookie
+
+    ngx.log(ngx.INFO, "redirect to: " .. args.origin)
+    ngx.redirect(args.origin)
+end
+
+function redirect_to_admin_auth_service()
+    local original_url = ngx.var.scheme .. '://' .. ngx.var.host .. ngx.var.request_uri
+    local redirect_to = login_uri .. "?" ..
+        ngx.encode_args({[login_redirect_arg] = original_url})
+
+    ngx.log(ngx.WARN, "redirect_to: " .. redirect_to)
+    ngx.redirect(redirect_to)
+end
+
+function M.auth_cookie(claim_specs)
     -- require Authorization request header
-    local auth_header = ngx.var.http_Authorization
-
-    if auth_header == nil then
-        ngx.log(ngx.WARN, "No Authorization header")
-        ngx.exit(ngx.HTTP_UNAUTHORIZED)
-    end
-
-    ngx.log(ngx.INFO, "Authorization: " .. auth_header)
-
-    -- require Bearer token
-    local _, _, token = string.find(auth_header, "Bearer%s+(.+)")
+    local token = ngx.var[cookie_key]
 
     if token == nil then
-        ngx.log(ngx.WARN, "Missing token")
-        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+        ngx.log(ngx.WARN, "No " .. cookie_name .. " cookie")
+        redirect_to_admin_auth_service()
     end
 
     ngx.log(ngx.INFO, "Token: " .. token)
@@ -47,7 +65,7 @@ function M.auth(claim_specs)
     local jwt_obj = jwt:verify(secret, token, 0)
     if jwt_obj.verified == false then
         ngx.log(ngx.WARN, "Invalid token: ".. jwt_obj.reason)
-        ngx.exit(ngx.HTTP_UNAUTHORIZED)
+        redirect_to_admin_auth_service()
     end
 
     ngx.log(ngx.INFO, "JWT: " .. cjson.encode(jwt_obj))
@@ -113,6 +131,7 @@ function M.auth(claim_specs)
     -- write the X-Auth-UserId header
     ngx.header["X-Auth-UserId"] = jwt_obj.payload.sub
 end
+
 
 function M.table_contains(table, item)
     for _, value in pairs(table) do
